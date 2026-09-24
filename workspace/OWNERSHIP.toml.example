@@ -1,0 +1,35 @@
+# Path ownership for a repo that several nodes work on at once.
+#
+# Task leases (or plain agreement) stop two nodes picking up the same TASK. They do not
+# stop two tasks running at the same time from editing the same FILES. This does, at
+# commit time.
+#
+# Copy to the root of the repo as OWNERSHIP.toml and install the guard in each clone:
+#   ln -sf /path/to/fleet-bridge/workspace/bin/ownership-guard.sh .git/hooks/pre-commit
+#
+# Rules are glob patterns, evaluated top to bottom, first match wins. Node names are the
+# fleet names from ~/.fleet-bridge/config.json ("node"), or FLEET_NODE.
+
+[nodes]
+laptop-a = "account A: GPU box, owns anything needing CUDA"
+laptop-b = "account B"
+
+[[rule]]
+paths = ["docs/**", "*.md"]
+owner = "any"          # prose rarely conflicts; let both write
+
+[[rule]]
+paths = ["src/core/**", "contracts/**"]
+owner = "laptop-a"
+
+[[rule]]
+paths = ["ui/**", "web/**", "frontend/**"]
+owner = "laptop-b"
+
+[[rule]]
+paths = ["migrations/**", "**/schema.sql"]
+owner = "laptop-a"     # schema changes go through one node, always
+
+[[rule]]
+paths = ["**"]
+owner = "any"          # default: unowned paths are open

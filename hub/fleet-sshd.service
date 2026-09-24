@@ -1,0 +1,21 @@
+# /etc/systemd/system/fleet-sshd.service on the hub — only with hub/fleet-sshd.conf.example.
+[Unit]
+Description=fleet-bridge sshd: tunnels only, from one tailnet device (:2222)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# /run/sshd is the compiled-in privilege-separation directory. ssh.service creates it, but
+# with socket activation ssh.service may not be running yet.
+ExecStartPre=/usr/bin/install -d -m 0755 /run/sshd
+ExecStartPre=/usr/sbin/sshd -t -f /etc/ssh/fleet/sshd_config
+ExecStart=/usr/sbin/sshd -D -e -f /etc/ssh/fleet/sshd_config
+ExecReload=/bin/kill -HUP $MAINPID
+# Binding the tailnet address fails until the tailnet interface has it; retry, don't give up.
+Restart=always
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

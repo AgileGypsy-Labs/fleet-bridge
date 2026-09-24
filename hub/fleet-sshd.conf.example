@@ -1,0 +1,40 @@
+# /etc/ssh/fleet/sshd_config on the hub — OPTIONAL. A second sshd that carries fleet-bridge
+# tunnels over a tailnet (Tailscale, Headscale, plain WireGuard) when a node is off the
+# hub's LAN. The hub's main sshd is untouched. Replace every <...> before use.
+#
+# Why a second daemon rather than the main one: if port 22 on the hub's tailnet address is
+# Tailscale SSH in "check" mode, every new connection needs a browser re-auth, which hangs
+# an unattended client. An `accept` ACL rule cannot fix that, because Tailscale evaluates
+# check rules before accept rules, and SSH rules cannot name a single device. This daemon
+# is narrower than any ACL: one source device (the WireGuard layer binds a tailnet IP to
+# that device), one user, keys only, and only the forwards the fleet uses.
+ListenAddress <HUB_TAILNET_IP>:2222
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_rsa_key
+PidFile /run/fleet-sshd.pid
+
+# The hub user the nodes log in as, from the one node that roams off the LAN.
+AllowUsers <HUB_USER>@<ROAMING_NODE_TAILNET_IP>
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+UsePAM no
+
+# Tunnels only. -N sessions never exec a command, so ForceCommand only bites a shell attempt.
+ForceCommand /bin/false
+PermitTTY no
+X11Forwarding no
+AllowAgentForwarding no
+AllowStreamLocalForwarding no
+PermitTunnel no
+AllowTcpForwarding yes
+GatewayPorts no
+# The roaming node may reach the other nodes' relay ports and publish only its own.
+# Example for a node on 8802 with one peer on 8801:
+PermitOpen 127.0.0.1:<PEER_RELAY_PORT>
+PermitListen 127.0.0.1:<OWN_RELAY_PORT>
+
+ClientAliveInterval 15
+ClientAliveCountMax 4

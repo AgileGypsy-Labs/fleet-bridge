@@ -1,0 +1,20 @@
+[Unit]
+Description=fleet-bridge relay tunnel (this node's relay <-> its peers', via the hub's loopback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# TUNNEL_ARGS (written by install.sh to ~/.fleet-bridge/tunnel.env):
+#   -R 127.0.0.1:<own port>:127.0.0.1:8787     publish this node's relay on the hub
+#   -L 127.0.0.1:<peer port>:127.0.0.1:<peer port>   one per peer, same number here
+# Both ends bind 127.0.0.1 only (keep GatewayPorts no on the hub), so no relay ever
+# listens on a LAN or tailnet address. The hub's host key must already be in
+# ~/.ssh/known_hosts: BatchMode never asks.
+EnvironmentFile=%h/.fleet-bridge/tunnel.env
+ExecStart=%h/.fleet-bridge/bin/hub-ssh $TUNNEL_ARGS
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

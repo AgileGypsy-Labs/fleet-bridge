@@ -1,0 +1,17 @@
+[Unit]
+Description=fleet-bridge relay agent (peer -> local Claude Code inbox socket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs from ~/.fleet-bridge/bin, where install.sh copies it, so a node needs no checkout
+# of this repo at any particular path. Binds 127.0.0.1 (agent.py refuses 0.0.0.0); peers
+# arrive through fleet-relay-tunnel.service, never directly.
+ExecStart=/usr/bin/python3 %h/.fleet-bridge/bin/agent.py
+Restart=always
+RestartSec=5
+Environment=FLEET_RELAY_PORT=8787
+
+[Install]
+WantedBy=default.target
