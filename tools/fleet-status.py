@@ -14,7 +14,7 @@ Optional settings in ~/.fleet-bridge/config.json, all with working defaults:
       "hub_units":     ["ssh"],
       "peer_ssh":      {"laptop-b": "me@laptop-b"},   # check a peer's user units over ssh
       "peer_units":    ["fleet-relay", "fleet-relay-tunnel"],
-      "control_plane": "http://127.0.0.1:7337/api/v1" # a software-factory control plane:
+      "control_plane": "http://127.0.0.1:7337/api/v1" # an owainlewis/factory control plane:
     }                                                 #   every worker online and healthy
 The relay checks go through the tunnels, so they cover the hub and peers even without
 any ssh settings.

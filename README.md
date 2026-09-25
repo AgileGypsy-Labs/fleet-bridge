@@ -108,9 +108,10 @@ sharing one account between people.
 
 ## Roadmap
 
-- Task claim and lease across nodes. Today this runs on a separate control plane,
-  `software-factory`, that isn't public yet. fleet-bridge already includes the pieces that
-  integrate with it: the hook skips job runs, and `fleet-status` checks its workers.
+- Task claim and lease across nodes. We use Owain Lewis's
+  [factory](https://github.com/owainlewis/factory) (MIT) for that: a control plane with workers
+  that run Claude Code jobs. fleet-bridge already works alongside it: the hook skips its job
+  runs, and `fleet-status` checks its workers.
 - A relay mode that picks the target session by working directory rather than recency.
 - macOS support, via launchd units instead of systemd user units.
 

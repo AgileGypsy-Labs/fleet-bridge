@@ -19,7 +19,7 @@ except Exception: print(os.uname().nodename)' 2>/dev/null)}"
 # inbox anyway; this keeps it that way if a later version gives them one.
 #   FLEET_NO_REGISTER=1   set it in any runner's environment to opt out
 #   FLEET_AGENT=1         delegate/fleet-agent runs
-#   FACTORY_JOB_ID        software-factory job runs
+#   FACTORY_JOB_ID        job runs of github.com/owainlewis/factory
 [ -z "${FLEET_NO_REGISTER:-}${FLEET_AGENT:-}${FACTORY_JOB_ID:-}" ] || exit 0
 
 payload=$(cat || true)
