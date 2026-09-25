@@ -11,7 +11,7 @@ sits idle. fleet-bridge adds the missing pieces:
 | **Relay** (`relay/`) | A session on one machine sends a message into a **live** session on another. It arrives the way Claude Code shows messages between local sessions: as a note from a teammate. |
 | **Delegation** (`delegate/`) | `fleet-agent` runs agent work (search, research, review, edits) for a session under a **second account** on the same machine. An optional hook sends the built-in Agent tool there for the repos you choose. |
 | **Ownership guard** (`workspace/`) | A pre-commit hook that assigns paths to nodes, so two machines working one repo can't both edit the same files. |
-| **Ops** (`tools/`, `relay/live-session.py`) | `fleet-status` checks every part by what it actually does and flags services that keep restarting. `live-session.py` drives a real interactive session on a machine nobody is sitting at, so the relay can be tested end to end. |
+| **Ops** (`tools/`, `relay/live-session.py`) | `fleet-status` checks every part by what it actually does and flags services that keep restarting. Each relay's `GET /v1/status` gives a dashboard the node's sessions by repo, services, power, delegated runs and Claude plan usage, and never message text or tokens. `live-session.py` drives a real interactive session on a machine nobody is sitting at, so the relay can be tested end to end. |
 
 **Status: experimental.** It runs daily on a small fleet: two Linux laptops, a Raspberry Pi 5 as the
 hub, and Claude Code 2.1.280. The relay relies on Claude Code's per-session inbox socket, and that
@@ -94,11 +94,12 @@ Full walkthroughs:
 ## Tests
 
 ```bash
-make test        # 19 tests: relay auth, replay and delivery against a fake inbox socket,
-                 # guard scope, fleet-agent environment and flags, ownership guard
+make test        # 26 tests: relay auth, replay and delivery against a fake inbox socket,
+                 # guard scope, fleet-agent environment and flags, ownership guard,
+                 # the status endpoint (nothing secret leaks) and usage parsing
 ```
 
-The tests need no Claude account, no network and no systemd.
+The tests need no Claude account, no internet access and no systemd.
 
 ## Accounts
 

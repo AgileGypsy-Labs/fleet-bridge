@@ -259,7 +259,8 @@ class FleetAgentTest(unittest.TestCase):
                               capture_output=True, text=True, env=env, cwd=self.home)
 
     def seen(self):
-        return json.load(open(self.log))
+        with open(self.log) as fh:
+            return json.load(fh)
 
     def test_runs_on_delegate_token_with_a_clean_environment(self):
         r = self.run_agent("count the files")
@@ -332,6 +333,209 @@ class OwnershipGuardTest(unittest.TestCase):
     def test_allows_own_and_open_paths(self):
         self.assertEqual(self.commit("src/core/a.py", "laptop-a").returncode, 0)
         self.assertEqual(self.commit("docs/notes.md", "laptop-b").returncode, 0)
+
+
+def git(*args, cwd=None):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
+                   env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+                            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com"))
+
+
+class StatusEndpointTest(unittest.TestCase):
+    """GET /v1/status from a real relay process: the numbers are right and nothing secret leaks."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        fb = os.path.join(self.home, ".fleet-bridge")
+        os.makedirs(os.path.join(fb, "sessions"))
+        with open(os.path.join(fb, "secret"), "w") as fh:
+            fh.write("s3cret-never-shown")
+        with open(os.path.join(fb, "config.json"), "w") as fh:
+            json.dump({"node": "laptop-b", "envelope": "sdk_user", "status": {"units": []},
+                       "delegate": {"account": "ops@example.com"}}, fh)
+        # a repo and a worktree of it: both must count as "alpha"
+        self.repo = os.path.join(self.home, "work", "alpha")
+        os.makedirs(self.repo)
+        git("init", "-q", "-b", "main", cwd=self.repo)
+        git("commit", "-q", "--allow-empty", "-m", "x", cwd=self.repo)
+        wt = os.path.join(self.repo, ".claude", "worktrees", "T-1")
+        git("worktree", "add", "-q", wt, cwd=self.repo)
+        now = time.time()
+        regs = [("s1", self.repo, "a.sock", now - 5), ("s2", wt, "b.sock", now - 4),
+                ("s0", self.repo, "a.sock", now - 50)]   # an older registration of the same socket
+        for sid, cwd, sock, t in regs:
+            path = os.path.join(self.home, sock)
+            open(path, "a").close()
+            with open(os.path.join(fb, "sessions", sid + ".json"), "w") as fh:
+                json.dump({"session_id": sid, "socket": path, "token": "tok-never-shown-" + sid,
+                           "cwd": cwd, "registered_at": t}, fh)
+        with open(os.path.join(fb, "delegate.log"), "w") as fh:
+            # appended as each run finishes; t is when it started
+            fh.write(json.dumps({"t": now - 90000, "cwd": self.repo, "ok": True, "task": "old"}) + "\n")
+            fh.write(json.dumps({"t": now - 120, "cwd": wt, "write": False, "ok": True, "secs": 30,
+                                 "task": "TOP-SECRET-PROMPT one"}) + "\n")
+            fh.write(json.dumps({"t": now - 60, "cwd": self.repo, "write": True, "ok": False, "secs": 9,
+                                 "task": "TOP-SECRET-PROMPT two"}) + "\n")
+        self.sysfs = os.path.join(self.home, "sysfs")
+        for name, files in (("ADP1", {"type": "Mains", "online": "0"}),
+                            ("BAT0", {"type": "Battery", "capacity": "8", "status": "Discharging"})):
+            os.makedirs(os.path.join(self.sysfs, name))
+            for k, v in files.items():
+                with open(os.path.join(self.sysfs, name, k), "w") as fh:
+                    fh.write(v + "\n")
+        self.port = free_port()
+        env = dict(os.environ, HOME=self.home, FLEET_RELAY_PORT=str(self.port), FLEET_SYSFS=self.sysfs)
+        self.proc = subprocess.Popen([sys.executable, os.path.join(RELAY, "agent.py")], env=env,
+                                     stderr=subprocess.DEVNULL)
+        for _ in range(50):
+            try:
+                urllib.request.urlopen("http://127.0.0.1:%d/v1/health" % self.port, timeout=1)
+                break
+            except (urllib.error.URLError, ConnectionError):
+                time.sleep(0.1)
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait()
+        shutil.rmtree(self.home)
+
+    def test_status(self):
+        with urllib.request.urlopen("http://127.0.0.1:%d/v1/status" % self.port, timeout=10) as r:
+            raw = r.read().decode()
+        st = json.loads(raw)
+        self.assertEqual(st["node"], "laptop-b")
+        self.assertEqual(st["sessions"], {"total": 2, "by_repo": {"alpha": 2}})
+        self.assertEqual(st["power"], {"ac": False, "battery": 8, "status": "Discharging", "on_battery": True})
+        d = st["delegate"]
+        self.assertEqual((d["account"], d["runs_1h"], d["runs_24h"], d["failed_24h"]), ("ops@example.com", 2, 2, 1))
+        self.assertEqual((d["last"]["repo"], d["last"]["ok"], d["last"]["write"]), ("alpha", False, True))
+        self.assertEqual(st["accounts"], [])
+        self.assertIn("per_core", st["load"])
+        for leak in ("s3cret-never-shown", "tok-never-shown", "TOP-SECRET-PROMPT"):
+            self.assertNotIn(leak, raw)
+
+
+class FakeAnthropic(threading.Thread):
+    """Stands in for the usage API and the messages endpoint's rate-limit headers."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        outer = self
+        self.hits = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def reply(self, code, body=b"{}", headers=()):
+                self.send_response(code)
+                for k, v in headers:
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                outer.hits.append((self.path, self.headers.get("Authorization")))
+                if self.headers.get("Authorization") != "Bearer good":
+                    return self.reply(401)
+                self.reply(200, json.dumps({"five_hour": {"utilization": 2.0}, "limits": [
+                    {"kind": "session", "group": "session", "percent": 2, "severity": "normal",
+                     "resets_at": "2026-09-25T18:40:00Z", "scope": None, "is_active": False},
+                    {"kind": "weekly_scoped", "group": "weekly", "percent": 100, "severity": "critical",
+                     "resets_at": "2026-09-27T03:00:00Z", "is_active": True,
+                     "scope": {"model": {"display_name": "Fable"}}}]}).encode())
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                outer.hits.append((self.path, self.headers.get("Authorization")))
+                if self.headers.get("Authorization") != "Bearer good":
+                    return self.reply(401)
+                pre = "anthropic-ratelimit-unified-"
+                self.reply(200, headers=[(pre + "5h-utilization", "0.02"), (pre + "5h-reset", "1790359800"),
+                                         (pre + "5h-status", "allowed"), (pre + "7d-utilization", "0.95"),
+                                         (pre + "7d-reset", "1790553600"), (pre + "7d-status", "allowed_warning"),
+                                         (pre + "status", "allowed_warning")])
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = "http://127.0.0.1:%d" % self.srv.server_address[1]
+
+    def run(self):
+        self.srv.serve_forever()
+
+
+class UsageSamplerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, RELAY)
+        import nodestatus
+        cls.ns = nodestatus
+        cls.api = FakeAnthropic()
+        cls.api.start()
+        os.environ["FLEET_USAGE_API"] = cls.api.url
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.api.srv.shutdown()
+        os.environ.pop("FLEET_USAGE_API", None)
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.api.hits.clear()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def creds(self, token, expires_in):
+        path = os.path.join(self.dir, "creds.json")
+        with open(path, "w") as fh:
+            json.dump({"claudeAiOauth": {"accessToken": token, "subscriptionType": "max",
+                                         "expiresAt": int((time.time() + expires_in) * 1000)}}, fh)
+        return path
+
+    def env_file(self, token):
+        path = os.path.join(self.dir, "t.env")
+        with open(path, "w") as fh:
+            fh.write("CLAUDE_CODE_OAUTH_TOKEN=%s\n" % token)
+        return path
+
+    def test_login_source_reads_every_limit_including_per_model(self):
+        got = self.ns.sample_login(self.creds("good", 3600))
+        self.assertEqual((got["state"], got["plan"]), ("ok", "max"))
+        fable = [l for l in got["limits"] if l["model"] == "Fable"][0]
+        self.assertEqual((fable["percent"], fable["severity"], fable["active"]), (100, "critical", True))
+        self.assertEqual(self.api.hits, [("/api/oauth/usage", "Bearer good")])
+
+    def test_an_expired_login_is_reported_without_calling_out(self):
+        got = self.ns.sample_login(self.creds("good", -60))
+        self.assertEqual(got["state"], "login-expired")
+        self.assertEqual(self.api.hits, [])
+
+    def test_a_refused_login_is_reported_as_expired(self):
+        self.assertEqual(self.ns.sample_login(self.creds("stale", 3600))["state"], "login-expired")
+
+    def test_header_source(self):
+        got = self.ns.sample_headers(self.env_file("good"))
+        self.assertEqual((got["state"], got["status"]), ("ok", "allowed_warning"))
+        by = {l["name"]: l for l in got["limits"]}
+        self.assertEqual((by["session"]["percent"], by["session"]["severity"]), (2, "normal"))
+        self.assertEqual((by["weekly_all"]["percent"], by["weekly_all"]["severity"]), (95, "critical"))
+        self.assertEqual(by["weekly_all"]["resets_at"], "2026-09-28T00:00:00Z")
+
+    def test_a_failed_sample_keeps_the_last_good_numbers(self):
+        path = self.env_file("good")
+        s = self.ns.Sampler([{"label": "ops@example.com", "source": "token-headers", "env_file": path}])
+        s.sample(s.accounts[0])
+        first = s.snapshot()[0]
+        self.env_file("revoked")
+        s.sample(s.accounts[0])
+        second = s.snapshot()[0]
+        self.assertEqual(second["state"], "token-invalid")
+        self.assertEqual((second["limits"], second["as_of"]), (first["limits"], first["as_of"]))
+
+    def test_no_power_supply_means_no_power_block(self):
+        self.assertIsNone(self.ns.power(self.dir))
 
 
 if __name__ == "__main__":

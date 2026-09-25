@@ -10,13 +10,16 @@
 #   --peer      NAME=PORT for each other node (repeatable).
 #   --hub       hub ssh endpoints, preferred first (see hub-ssh.sh).
 #   --hub-user  the account on the hub.
+#   --usage     LABEL=claude-login  or  LABEL=token-headers:ENV_FILE  (repeatable, optional)
+#               Claude accounts whose usage this node reports in GET /v1/status. Replaces
+#               the node's list when given. See relay/nodestatus.py for the two sources.
 #
 # The first node to run this generates the shared secret. Copy it to every other node
 # BEFORE running install there, or that node generates its own and every message 401s:
 #   ssh <node> 'umask 077; mkdir -p ~/.fleet-bridge; cat > ~/.fleet-bridge/secret' < ~/.fleet-bridge/secret
 # The secret is never printed; compare the fingerprint this script prints on each node.
 set -euo pipefail
-NODE="" PORT="" HUB="" HUB_USER_ARG="" PEERS=()
+NODE="" PORT="" HUB="" HUB_USER_ARG="" PEERS=() USAGE=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --node) NODE="$2"; shift 2 ;;
@@ -24,7 +27,8 @@ while [ $# -gt 0 ]; do
     --peer) PEERS+=("$2"); shift 2 ;;
     --hub) HUB="$2"; shift 2 ;;
     --hub-user) HUB_USER_ARG="$2"; shift 2 ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    --usage) USAGE+=("$2"); shift 2 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -39,7 +43,7 @@ UNITS="$HOME/.config/systemd/user"
 
 mkdir -p "$BIN" "$HOME_DIR/sessions" "$UNITS"
 chmod 700 "$HOME_DIR" "$HOME_DIR/sessions"
-install -m 0644 "$SRC/socketio.py" "$BIN/"
+install -m 0644 "$SRC/socketio.py" "$SRC/nodestatus.py" "$BIN/"
 install -m 0755 "$SRC/agent.py" "$SRC/send.py" "$SRC/probe.py" "$SRC/live-session.py" "$BIN/"
 install -m 0755 "$SRC/hooks/session-start.sh" "$BIN/session-start.sh"
 install -m 0755 "$SRC/hub-ssh.sh" "$BIN/hub-ssh"
@@ -64,15 +68,24 @@ peers_json="${peers_json%, }}"
 printf 'HUB_ENDPOINTS=%s\nHUB_USER=%s\nTUNNEL_ARGS=%s\n' "$HUB" "$HUB_USER_ARG" "$args" > "$HOME_DIR/tunnel.env"
 printf '%s\n' "$peers_json" | python3 -m json.tool > "$HOME_DIR/peers.json"
 
-python3 - "$HOME_DIR/config.json" "$NODE" <<'PY'
+python3 - "$HOME_DIR/config.json" "$NODE" "${USAGE[@]}" <<'PY'
 import json, os, sys
-path, node = sys.argv[1], sys.argv[2]
+path, node, usage = sys.argv[1], sys.argv[2], sys.argv[3:]
 try:
     cfg = json.load(open(path))
 except (OSError, ValueError):
     cfg = {}
 cfg["node"] = node
 cfg.setdefault("envelope", "sdk_user")   # docs/inbox-socket.md; re-check with probe.py
+if usage:
+    accounts = []
+    for spec in usage:
+        label, _, src = spec.partition("=")
+        source, _, env_file = src.partition(":")
+        if not label or source not in ("claude-login", "token-headers") or (source == "token-headers") != bool(env_file):
+            sys.exit("bad --usage %r: want LABEL=claude-login or LABEL=token-headers:ENV_FILE" % spec)
+        accounts.append({"label": label, "source": source, **({"env_file": env_file} if env_file else {})})
+    cfg["accounts"] = accounts
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as fh:
     json.dump(cfg, fh, indent=2)

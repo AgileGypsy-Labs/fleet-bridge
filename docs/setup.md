@@ -128,6 +128,53 @@ A unit only counts as healthy if it is active **and** its restart counter hasn't
 last pass. A tunnel that restarts every ten seconds still reads `active`. Run it from a timer or
 cron, or in a loop while you test something.
 
+### A status endpoint for dashboards
+
+Each relay also answers `GET /v1/status` on its loopback port. The hub reaches every node's relay
+at the node's published port, so a dashboard on the hub can read the whole fleet:
+
+```bash
+curl -s http://127.0.0.1:8801/v1/status     # on the hub: laptop-a
+```
+
+It returns counts, states and percentages only:
+
+| Key | What |
+|---|---|
+| `sessions` | live registered sessions, `total` and `by_repo`. Git worktrees count under their repo. |
+| `units` | `ActiveState` and `NRestarts` for each unit in `config.json` `status.units` (default: the two relay units) |
+| `power` | `ac`, `battery` percent, `status`, and `on_battery`. `null` on a machine without a battery or mains supply entry. |
+| `load` | `load1`, `cpus`, `per_core`, `mem_used_pct` |
+| `delegate` | `fleet-agent` runs in the last hour and day, failures, runs in flight, and the last run's repo, duration and result. Present only when delegation is installed. |
+| `accounts` | Claude plan usage per configured account, see below |
+
+It never returns message text, delegated prompts, session tokens, account tokens or the shared
+secret, so it needs no signature. A test checks that. Like `/v1/health`, it's reachable only on
+loopback and through the ssh tunnel.
+
+#### Account usage
+
+Name the accounts a node should report when you install it:
+
+```bash
+relay/install.sh ... --usage you@example.com=claude-login \
+                     --usage ops@example.com=token-headers:$HOME/.fleet-bridge/delegate.env
+```
+
+- **`claude-login`** reads this machine's Claude Code login (`~/.claude/.credentials.json`) and asks
+  the usage API every 5 minutes. It returns every limit the plan has: the 5-hour session, the week,
+  and any per-model weekly limit, each with its reset time. It uses the access token only and never
+  the refresh token, so it can't disturb Claude Code's login. When the access token has expired, the
+  account shows `login-expired` until Claude Code is used on that machine again.
+- **`token-headers`** is for a `claude setup-token` token, which the usage API refuses. Every 10
+  minutes it sends a one-token request (Haiku by default, `FLEET_PROBE_MODEL` to change it) and reads
+  the 5-hour and weekly utilization from the response's rate-limit headers. That's about 150 tokens
+  an hour. On an account measured both ways, the two sources agreed.
+
+The usage API and the `anthropic-ratelimit-unified-*` headers are what Claude Code itself reads.
+Neither is documented. If either changes, the account shows `error` with a reason, and the last
+good numbers stay, with `as_of` giving their age.
+
 ## Troubleshooting
 
 | Symptom | Look at |

@@ -10,7 +10,10 @@ the secret is dropped before it touches a socket. A timestamp outside +-SKEW sec
 signature already accepted within that window (a replay), is refused the same way.
 
     POST /v1/message   {"text": "...", "from": "laptop-a", "session": "<optional id prefix>"}
-    GET  /v1/health
+    GET  /v1/health    relay up, envelope, live session ids
+    GET  /v1/status    node status for a dashboard: sessions by repo, services, power,
+                       load, delegated work, account usage (nodestatus.py). Counts and
+                       states only, never message text or tokens.
 """
 import glob
 import hashlib
@@ -25,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from socketio import deliver, load_config  # noqa: E402
+import nodestatus  # noqa: E402
 
 HOME = os.path.expanduser("~/.fleet-bridge")
 REG = os.path.join(HOME, "sessions")
@@ -33,6 +37,7 @@ SKEW = 120  # seconds
 PORT = int(os.environ.get("FLEET_RELAY_PORT", "8787"))
 SEEN = {}                 # signature -> timestamp, for replay refusal within SKEW
 SEEN_LOCK = threading.Lock()
+SAMPLER = None            # nodestatus.Sampler, started in main() when accounts are configured
 
 
 def first_use(sig, ts):
@@ -86,6 +91,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/v1/status":
+            return self._json(200, nodestatus.status(load_config(), live_sessions(), SAMPLER))
         if self.path != "/v1/health":
             return self._json(404, {"error": "not found"})
         cfg = load_config()
@@ -158,6 +165,11 @@ def main():
     addr = os.environ.get("FLEET_RELAY_BIND") or "127.0.0.1"
     if addr == "0.0.0.0":
         sys.exit("refusing to bind 0.0.0.0: peers arrive through the hub tunnel, not the network")
+    global SAMPLER
+    accounts = load_config().get("accounts")
+    if accounts:
+        SAMPLER = nodestatus.Sampler(accounts)
+        SAMPLER.start()
     srv = ThreadingHTTPServer((addr, PORT), Handler)
     sys.stderr.write("fleet-relay listening on %s:%d\n" % (addr, PORT))
     srv.serve_forever()
