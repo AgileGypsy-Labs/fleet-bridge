@@ -9,7 +9,7 @@ sits idle. fleet-bridge adds the missing pieces:
 | Piece | What it does |
 |---|---|
 | **Relay** (`relay/`) | A session on one machine sends a message into a **live** session on another. It arrives the way Claude Code shows messages between local sessions: as a note from a teammate. |
-| **Delegation** (`delegate/`) | `fleet-agent` runs agent work (search, research, review, edits) for a session under a **second account** on the same machine. An optional hook sends the built-in Agent tool there for the repos you choose. |
+| **Delegation** (`delegate/`) | `fleet-agent` runs agent work (search, research, review, edits) for a session under a **second account** on the same machine. An optional hook sends the built-in Agent tool there for the repos you choose, and `delegate-session` can start whole sessions in those repos on that account. |
 | **Ownership guard** (`workspace/`) | A pre-commit hook that assigns paths to nodes, so two machines working one repo can't both edit the same files. |
 | **Ops** (`tools/`, `relay/live-session.py`) | `fleet-status` checks every part by what it actually does and flags services that keep restarting. Each relay's `GET /v1/status` gives a dashboard the node's sessions by repo, services, power, delegated runs and Claude plan usage, and never message text or tokens. `live-session.py` drives a real interactive session on a machine nobody is sitting at, so the relay can be tested end to end. |
 
@@ -94,9 +94,10 @@ Full walkthroughs:
 ## Tests
 
 ```bash
-make test        # 26 tests: relay auth, replay and delivery against a fake inbox socket,
-                 # guard scope, fleet-agent environment and flags, ownership guard,
-                 # the status endpoint (nothing secret leaks) and usage parsing
+make test        # 32 tests: relay auth, replay and delivery against a fake inbox socket,
+                 # guard scope, fleet-agent environment and flags, delegate-session token
+                 # routing, ownership guard, the status endpoint (nothing secret leaks)
+                 # and usage parsing
 ```
 
 The tests need no Claude account, no internet access and no systemd.

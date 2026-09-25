@@ -59,6 +59,32 @@ guard stays silent.
   delegate account, so its own subagents run there too.
 - **`fleet-agent` refuses to run inside itself.** There's no reason to nest.
 
+## Whole sessions on the delegate account
+
+`fleet-agent` moves agent work. To move whole sessions, every turn and not just subagents, start
+them through `delegate-session` and install with `--sessions`:
+
+```bash
+delegate/install.sh --account ops@example.com --sessions ~/code/api ~/code/web
+```
+
+`delegate-session <claude> [args...]` looks at the directory it starts in. Inside a listed repo,
+worktrees included, it gives the session the delegate token. Anywhere else the session starts
+unchanged.
+
+- **IDE extension:** set `claudeCode.claudeProcessWrapper` to the full path of
+  `~/.fleet-bridge/bin/delegate-session`. The extension runs its wrapper as
+  `<wrapper> <real claude> <args>`. If you already have a wrapper, end it with
+  `exec ~/.fleet-bridge/bin/delegate-session "$@"` instead of `exec "$@"`.
+- **Terminal:** `~/.fleet-bridge/bin/delegate-session claude`.
+- **Running sessions keep the account they started with.** To move one, close it and resume it.
+  The conversation carries over, and its next turn counts against the delegate account.
+- **It fails closed**, like `fleet-agent`. A token file readable by others, or one without a
+  token, stops the session from starting. A revoked token fails with 401: Claude Code keeps a
+  `CLAUDE_CODE_OAUTH_TOKEN` it was given rather than falling back to the stored login.
+- The guard lets these sessions use the Agent tool, since their subagents already run on the
+  delegate account.
+
 ## Permission modes
 
 | | Tools | Enforced by |

@@ -3,9 +3,10 @@
 # In the repos listed under "delegate" -> "repos" in ~/.fleet-bridge/config.json, and
 # anything below them (worktrees included), it refuses the built-in Agent tool and points
 # the session at fleet-agent, so agent work there runs on the delegate account. Elsewhere
-# it says nothing. Inside a fleet-agent run the session already is the delegate account,
-# so its own subagents pass.
+# it says nothing. Inside a fleet-agent run, or a session that delegate-session started,
+# the session already is the delegate account, so its own subagents pass.
 [ -z "${FLEET_AGENT:-}" ] || exit 0
+[ -z "${FLEET_DELEGATE_SESSION:-}" ] || exit 0
 exec python3 -c '
 import json, os, sys
 try:

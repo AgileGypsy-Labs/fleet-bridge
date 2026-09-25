@@ -214,6 +214,9 @@ class AgentGuardTest(unittest.TestCase):
     def test_silent_inside_a_fleet_agent_run(self):
         self.assertIsNone(self.guard(self.repo, FLEET_AGENT="1"))
 
+    def test_silent_in_a_session_already_on_the_delegate_account(self):
+        self.assertIsNone(self.guard(self.repo, FLEET_DELEGATE_SESSION="1"))
+
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -536,6 +539,86 @@ class UsageSamplerTest(unittest.TestCase):
 
     def test_no_power_supply_means_no_power_block(self):
         self.assertIsNone(self.ns.power(self.dir))
+
+
+SHOW_ENV = r"""#!/usr/bin/env python3
+import json, os, sys
+json.dump({"argv": sys.argv[1:], "token": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"),
+           "api_key": os.environ.get("ANTHROPIC_API_KEY"),
+           "marker": os.environ.get("FLEET_DELEGATE_SESSION")}, sys.stdout)
+"""
+
+
+class DelegateSessionTest(unittest.TestCase):
+    """delegate-session, run the way an IDE extension runs its process wrapper."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.repo = os.path.join(self.home, "work", "repo")
+        os.makedirs(os.path.join(self.repo, ".claude", "worktrees", "T-1"))
+        os.makedirs(os.path.join(self.home, "work", "repo2"))
+        fb = os.path.join(self.home, ".fleet-bridge")
+        os.makedirs(fb)
+        self.env_file = os.path.join(fb, "delegate.env")
+        with open(self.env_file, "w") as fh:
+            fh.write("CLAUDE_CODE_OAUTH_TOKEN=tok-delegate\n")
+        os.chmod(self.env_file, 0o600)
+        with open(os.path.join(fb, "config.json"), "w") as fh:
+            json.dump({"delegate": {"account": "ops@example.com", "env_file": self.env_file,
+                                    "repos": [self.repo], "session_repos": [self.repo]}}, fh)
+        self.claude = os.path.join(self.home, "claude")
+        with open(self.claude, "w") as fh:
+            fh.write(SHOW_ENV)
+        os.chmod(self.claude, 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.home)
+
+    def launch(self, cwd):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_CODE_OAUTH_TOKEN", "FLEET_DELEGATE_SESSION", "FLEET_CONFIG")}
+        env.update(HOME=self.home, ANTHROPIC_API_KEY="sk-machine")
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "delegate", "delegate-session.py"),
+                            self.claude, "--output-format", "stream-json", "--dangerously-skip-permissions"],
+                           cwd=cwd, capture_output=True, text=True, env=env)
+        return r.returncode, (json.loads(r.stdout) if r.stdout.strip() else None), r.stderr
+
+    def test_in_a_listed_repo_and_its_worktrees_the_session_gets_the_delegate_token(self):
+        for cwd in (self.repo, os.path.join(self.repo, ".claude", "worktrees", "T-1")):
+            rc, out, _ = self.launch(cwd)
+            self.assertEqual(rc, 0, cwd)
+            self.assertEqual((out["token"], out["marker"], out["api_key"]), ("tok-delegate", "1", None), cwd)
+            self.assertEqual(out["argv"], ["--output-format", "stream-json", "--dangerously-skip-permissions"])
+
+    def test_elsewhere_the_session_starts_unchanged(self):
+        for cwd in (os.path.join(self.home, "work"), os.path.join(self.home, "work", "repo2")):
+            rc, out, _ = self.launch(cwd)
+            self.assertEqual((rc, out["token"], out["marker"], out["api_key"]), (0, None, None, "sk-machine"), cwd)
+
+    def test_a_token_file_readable_by_others_stops_the_session(self):
+        os.chmod(self.env_file, 0o644)
+        rc, out, err = self.launch(self.repo)
+        self.assertNotEqual(rc, 0)
+        self.assertIsNone(out)
+        self.assertIn("chmod 600", err)
+
+    def test_a_missing_token_stops_the_session_instead_of_using_the_machine_login(self):
+        with open(self.env_file, "w") as fh:
+            fh.write("# emptied\n")
+        rc, out, err = self.launch(self.repo)
+        self.assertNotEqual(rc, 0)
+        self.assertIsNone(out)
+        self.assertIn("no CLAUDE_CODE_OAUTH_TOKEN", err)
+
+    def test_repos_without_session_opt_in_keep_the_machine_login(self):
+        cfg = os.path.join(self.home, ".fleet-bridge", "config.json")
+        with open(cfg) as fh:
+            d = json.load(fh)
+        del d["delegate"]["session_repos"]
+        with open(cfg, "w") as fh:
+            json.dump(d, fh)
+        rc, out, _ = self.launch(self.repo)
+        self.assertEqual((rc, out["token"], out["api_key"]), (0, None, "sk-machine"))
 
 
 if __name__ == "__main__":
