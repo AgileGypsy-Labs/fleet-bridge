@@ -19,6 +19,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RELAY = os.path.join(ROOT, "relay")
@@ -77,6 +78,7 @@ class RelayTest(unittest.TestCase):
             with open(os.path.join(fb, "sessions", sid + ".json"), "w") as fh:
                 json.dump({"session_id": sid, "node": "laptop-b", "socket": path,
                            "token": "tok-" + sid, "cwd": "/x",
+                           "account": {"aaaa1111": "john@", "bbbb2222": "ai@"}[sid],
                            "registered_at": time.time() - age}, fh)
         self.port = free_port()
         env = dict(os.environ, HOME=self.home, FLEET_RELAY_PORT=str(self.port))
@@ -117,7 +119,18 @@ class RelayTest(unittest.TestCase):
 
     def test_health_lists_live_sessions_newest_first(self):
         with urllib.request.urlopen("http://127.0.0.1:%d/v1/health" % self.port) as r:
-            self.assertEqual(json.load(r)["sessions"], ["bbbb2222", "aaaa1111"])
+            info = json.load(r)
+        self.assertEqual(info["sessions"], ["bbbb2222", "aaaa1111"])
+        self.assertEqual(info["accounts"], {"ai@": 1, "john@": 1})
+
+    def test_account_targets_the_newest_session_on_that_account(self):
+        status, info = self.post({"text": "hi john", "from": "laptop-a", "account": "john@"})
+        self.assertEqual((status, info["delivered_to"], info["account"]), (200, "aaaa1111", "john@"))
+        self.wait_for("aaaa1111")
+        self.assertEqual(len(self.inboxes["aaaa1111"].received), 1)
+        self.assertEqual(self.inboxes["bbbb2222"].received, [])
+        status, info = self.post({"text": "x", "from": "a", "account": "nobody@"})
+        self.assertEqual((status, info["error"]), (404, "no live registered session on nobody@"))
 
     def test_signed_message_reaches_newest_session_with_auth_line(self):
         status, body = self.post({"text": "hello", "from": "laptop-a"})
@@ -181,6 +194,133 @@ class RelayTest(unittest.TestCase):
         self.assertEqual((status, body["delivered_to"]), (200, "aaaa1111"))
 
 
+class FakeHub(threading.Thread):
+    """Caravan's GET /v1/route, checking the signature the way the hub does."""
+
+    def __init__(self, secret, answer):
+        super().__init__(daemon=True)
+        self.calls, self.answer = [], answer
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _json(self, status, obj):
+                body = json.dumps(obj).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                hub.calls.append(self.path)
+                ts = self.headers.get("X-Caravan-Ts") or ""
+                nonce = self.headers.get("X-Caravan-Nonce") or ""
+                sig = self.headers.get("X-Caravan-Sig") or ""
+                msg = b".".join([ts.encode(), nonce.encode(), b"GET", self.path.encode(), b""])
+                expect = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+                if not ts.isdigit() or abs(time.time() - int(ts)) > 120 or not hmac.compare_digest(expect, sig):
+                    return self._json(401, {"error": "bad signature"})
+                self._json(200, hub.answer)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def run(self):
+        self.server.serve_forever(poll_interval=0.1)
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class RouteTest(unittest.TestCase):
+    """delegate/route.py: the hub's verdict, the cache while the hub is away, then nothing
+    (the caller's static rule), and an environment with exactly one credential."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(ROOT, "delegate"))
+        import route
+        self.route = route
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        self.secret = b"x" * 40
+        self.secret_file = os.path.join(self.home, "caravan-secret")
+        with open(self.secret_file, "wb") as fh:
+            fh.write(self.secret)
+        os.chmod(self.secret_file, 0o600)
+        self.hub = FakeHub(self.secret, {"account": "ai@", "reason": "ai@: headroom (highest 20%)",
+                                         "ttl": 60, "headroom": {"ai@": 80, "john@": 60}})
+        self.hub.start()
+        self.addCleanup(self.hub.stop)
+        self.env_file = os.path.join(self.home, "ai.env")
+        with open(self.env_file, "w") as fh:
+            fh.write("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test\n")
+        os.chmod(self.env_file, 0o600)
+        self.cfg = {"node": "laptop-a",
+                    "route": {"hub": self.hub.url, "secret_file": self.secret_file, "timeout": 2},
+                    "delegate": {"accounts": [
+                        {"label": "john@", "config_dir": os.path.join(self.home, "claude-john"), "own": True},
+                        {"label": "ai@", "env_file": self.env_file}]}}
+        route.CACHE = os.path.join(self.home, "route-cache.json")
+        route.LOG = os.path.join(self.home, "route.log")
+
+    def test_hub_verdict_then_cache_then_nothing(self):
+        v = self.route.decide("session", "fable", self.cfg, now=1000.0)
+        self.assertEqual((v["label"], v["source"]), ("ai@", "hub"))
+        self.assertEqual(v["account"]["env_file"], self.env_file)
+        self.assertEqual(v["headroom"], {"ai@": 80, "john@": 60})
+        self.assertIn("accounts=john%40%2Cai%40", self.hub.calls[0])
+        self.assertIn("model=fable", self.hub.calls[0])
+        self.assertIn("node=laptop-a", self.hub.calls[0])
+        self.hub.stop()   # hub away: the cached answer stands in for 15 minutes
+        v = self.route.decide("session", "fable", self.cfg, now=1600.0)
+        self.assertEqual((v["label"], v["source"]), ("ai@", "cache"))
+        self.assertIn("cached 10m ago", v["reason"])
+        v = self.route.decide("agent", "fable", self.cfg, now=1600.0)   # another key: nothing cached
+        self.assertEqual((v["label"], v["source"]), (None, None))
+        v = self.route.decide("session", "fable", self.cfg, now=1901.0)
+        self.assertEqual((v["label"], v["source"]), (None, None))
+        self.assertIn("hub unreachable", v["reason"])
+        with open(self.route.LOG) as fh:
+            self.assertEqual(len(fh.read().splitlines()), 4)
+
+    def test_a_refusal_or_an_unusable_secret_is_no_verdict(self):
+        with open(self.secret_file, "wb") as fh:
+            fh.write(b"y" * 40)
+        v = self.route.decide("session", None, self.cfg)
+        self.assertEqual(v["label"], None)
+        self.assertIn("401", v["reason"])
+        os.chmod(self.secret_file, 0o644)
+        v = self.route.decide("session", None, self.cfg)
+        self.assertEqual(v["label"], None)
+        self.assertIn("readable by others", v["reason"])
+
+    def test_apply_sets_exactly_one_credential(self):
+        env = {"ANTHROPIC_API_KEY": "leak", "CLAUDE_CODE_OAUTH_TOKEN": "leak",
+               "CLAUDE_CONFIG_DIR": "/elsewhere", "HOME": self.home}
+        out = self.route.apply(dict(env), self.cfg["delegate"]["accounts"][0])
+        self.assertEqual(out["CLAUDE_CONFIG_DIR"], os.path.join(self.home, "claude-john"))
+        self.assertEqual(out["FLEET_ACCOUNT"], "john@")
+        self.assertNotIn("ANTHROPIC_API_KEY", out)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", out)
+        out = self.route.apply(dict(env), self.cfg["delegate"]["accounts"][1])
+        self.assertEqual((out["CLAUDE_CODE_OAUTH_TOKEN"], out["FLEET_ACCOUNT"]), ("sk-ant-oat01-test", "ai@"))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", out)
+        os.chmod(self.env_file, 0o644)
+        with self.assertRaises(self.route.RouteError):
+            self.route.apply(dict(env), self.cfg["delegate"]["accounts"][1])
+
+    def test_not_configured_means_no_verdict(self):
+        v = self.route.decide("session", None, {"node": "x"})
+        self.assertEqual((v["label"], v["reason"]), (None, "routing not configured"))
+        self.assertEqual(self.route.model_from(["--model", "opus", "-p"]), "opus")
+        self.assertEqual(self.route.model_from(["--model=fable"]), "fable")
+        self.assertIsNone(self.route.model_from(["-p"]))
+
+
 class AgentGuardTest(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
@@ -195,7 +335,8 @@ class AgentGuardTest(unittest.TestCase):
         shutil.rmtree(self.home)
 
     def guard(self, cwd, **extra):
-        env = {k: v for k, v in os.environ.items() if k != "FLEET_AGENT"}
+        # A test run started from a delegate session inherits its marker, which silences the guard.
+        env = {k: v for k, v in os.environ.items() if k not in ("FLEET_AGENT", "FLEET_DELEGATE_SESSION")}
         env.update(HOME=self.home, **extra)
         r = subprocess.run(["bash", os.path.join(ROOT, "delegate", "agent-guard.sh")],
                            input=json.dumps({"cwd": cwd}), capture_output=True, text=True, env=env)
@@ -407,13 +548,19 @@ class StatusEndpointTest(unittest.TestCase):
             raw = r.read().decode()
         st = json.loads(raw)
         self.assertEqual(st["node"], "laptop-b")
-        self.assertEqual(st["sessions"], {"total": 2, "by_repo": {"alpha": 2}})
+        self.assertEqual(st["sessions"], {"total": 2, "by_repo": {"alpha": 2}, "by_account": {"?": 2}})
         self.assertEqual(st["power"], {"ac": False, "battery": 8, "status": "Discharging", "on_battery": True})
         d = st["delegate"]
         self.assertEqual((d["account"], d["runs_1h"], d["runs_24h"], d["failed_24h"]), ("ops@example.com", 2, 2, 1))
         self.assertEqual((d["last"]["repo"], d["last"]["ok"], d["last"]["write"]), ("alpha", False, True))
         self.assertEqual(st["accounts"], [])
         self.assertIn("per_core", st["load"])
+        # the hub dashboard's host strip and routing line
+        self.assertEqual(set(st["host"]), {"cpu_temp_c", "disk_used_pct", "uptime_s", "updates", "reboot_required"})
+        self.assertIsInstance(st["host"]["disk_used_pct"], int)
+        self.assertIsInstance(st["host"]["uptime_s"], int)
+        self.assertEqual(d["config"], {"session_repos": [], "failover": False,
+                                       "routed": False, "accounts": []})
         for leak in ("s3cret-never-shown", "tok-never-shown", "TOP-SECRET-PROMPT"):
             self.assertNotIn(leak, raw)
 
@@ -619,6 +766,42 @@ class DelegateSessionTest(unittest.TestCase):
             json.dump(d, fh)
         rc, out, _ = self.launch(self.repo)
         self.assertEqual((rc, out["token"], out["api_key"]), (0, None, "sk-machine"))
+
+    def set_failover(self, mode):
+        env = {k: v for k, v in os.environ.items() if k != "FLEET_CONFIG"}
+        env["HOME"] = self.home
+        return subprocess.run([sys.executable, os.path.join(ROOT, "delegate", "delegate-session.py"),
+                               "--failover", mode], capture_output=True, text=True, env=env)
+
+    def test_with_failover_on_every_folder_gets_the_delegate_token_even_new_ones(self):
+        self.assertIn("failover on", self.set_failover("on").stdout)
+        made_later = os.path.join(self.home, "made-after-failover", "project")
+        os.makedirs(made_later)
+        for cwd in (self.home, os.path.join(self.home, "work", "repo2"), made_later, self.repo):
+            rc, out, _ = self.launch(cwd)
+            self.assertEqual((rc, out["token"], out["marker"], out["api_key"]), (0, "tok-delegate", "1", None), cwd)
+        cfg = os.path.join(self.home, ".fleet-bridge", "config.json")
+        self.assertEqual(os.stat(cfg).st_mode & 0o777, 0o600)
+        with open(cfg) as fh:
+            d = json.load(fh)["delegate"]
+        self.assertEqual((d["failover"], d["session_repos"], d["account"]), (True, [self.repo], "ops@example.com"))
+
+    def test_failover_off_goes_back_to_the_listed_repos(self):
+        self.set_failover("on")
+        self.assertIn("failover off", self.set_failover("off").stdout)
+        rc, out, _ = self.launch(os.path.join(self.home, "work", "repo2"))
+        self.assertEqual((rc, out["token"], out["api_key"]), (0, None, "sk-machine"))
+        rc, out, _ = self.launch(self.repo)
+        self.assertEqual(out["token"], "tok-delegate")
+        self.assertIn("failover off", self.set_failover("status").stdout)
+
+    def test_failover_still_fails_closed(self):
+        self.set_failover("on")
+        os.chmod(self.env_file, 0o644)
+        rc, out, err = self.launch(self.home)
+        self.assertNotEqual(rc, 0)
+        self.assertIsNone(out)
+        self.assertIn("chmod 600", err)
 
 
 if __name__ == "__main__":

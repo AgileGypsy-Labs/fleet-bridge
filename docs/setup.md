@@ -145,7 +145,8 @@ It returns counts, states and percentages only:
 | `units` | `ActiveState` and `NRestarts` for each unit in `config.json` `status.units` (default: the two relay units) |
 | `power` | `ac`, `battery` percent, `status`, and `on_battery`. `null` on a machine without a battery or mains supply entry. |
 | `load` | `load1`, `cpus`, `per_core`, `mem_used_pct` |
-| `delegate` | `fleet-agent` runs in the last hour and day, failures, runs in flight, and the last run's repo, duration and result. Present only when delegation is installed. |
+| `host` | `cpu_temp_c`, `disk_used_pct` (root), `uptime_s`, `updates` (Ubuntu's pending count, else `null`), `reboot_required` |
+| `delegate` | `config` (`session_repos` as repo names, `failover`), `fleet-agent` runs in the last hour and day, failures, runs in flight, and the last run's repo, duration and result. Present only when delegation is installed. |
 | `accounts` | Claude plan usage per configured account, see below |
 
 It never returns message text, delegated prompts, session tokens, account tokens or the shared
@@ -158,14 +159,21 @@ Name the accounts a node should report when you install it:
 
 ```bash
 relay/install.sh ... --usage you@example.com=claude-login \
-                     --usage ops@example.com=token-headers:$HOME/.fleet-bridge/delegate.env
+                     --usage second@example.com=claude-login:$HOME/.claude-second/.credentials.json \
+                     --usage ops@example.com=token-headers:$HOME/.fleet-bridge/delegate.env \
+                     --settings $HOME/.claude/settings.json --settings $HOME/.claude-second/settings.json
 ```
 
-- **`claude-login`** reads this machine's Claude Code login (`~/.claude/.credentials.json`) and asks
-  the usage API every 5 minutes. It returns every limit the plan has: the 5-hour session, the week,
-  and any per-model weekly limit, each with its reset time. It uses the access token only and never
-  the refresh token, so it can't disturb Claude Code's login. When the access token has expired, the
-  account shows `login-expired` until Claude Code is used on that machine again.
+- **`claude-login`** reads this machine's Claude Code login (`~/.claude/.credentials.json`, or the
+  `.credentials.json` named after the colon for a second login kept in its own
+  `CLAUDE_CONFIG_DIR`) and asks the usage API every 5 minutes. It returns every limit the plan has:
+  the 5-hour session, the week, and any per-model weekly limit, each with its reset time. A limit's
+  `active` flag means in force (used up); the API's own "is active" only says the window is
+  counting. It uses the access token only and never the refresh token, so it can't disturb Claude
+  Code's login. When the access token has expired, the account shows `login-expired` until Claude
+  Code is used on that machine again.
+- **`--settings`** names each `settings.json` the SessionStart hook is registered in: one per
+  `CLAUDE_CONFIG_DIR` sessions start from on this node (default: `~/.claude/settings.json`).
 - **`token-headers`** is for a `claude setup-token` token, which the usage API refuses. Every 10
   minutes it sends a one-token request (Haiku by default, `FLEET_PROBE_MODEL` to change it) and reads
   the 5-hour and weekly utilization from the response's rate-limit headers. That's about 150 tokens

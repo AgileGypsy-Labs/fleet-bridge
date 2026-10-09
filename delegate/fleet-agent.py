@@ -12,6 +12,9 @@ Configured in ~/.fleet-bridge/config.json (delegate/install.sh writes it):
     "delegate": {"account": "ops@example.com", "env_file": "~/.fleet-bridge/delegate.env",
                  "repos": ["/abs/path/to/repo", ...]}
 env_file holds CLAUDE_CODE_OAUTH_TOKEN=<token from `claude setup-token`>, mode 0600.
+With routing configured (route.py: a "route" block and "delegate" -> "accounts"), the run goes
+to whichever account the Caravan hub names as having the most headroom for --model; the
+delegate account above is the fallback when neither the hub nor the route cache answers.
 The agent's final answer goes to stdout, a one-line summary to stderr. Exit status is
 non-zero when the agent failed or ran out of time.
 
@@ -30,6 +33,9 @@ import signal
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import route  # noqa: E402  (installed beside this script)
 
 HOME = os.path.expanduser("~")
 CONFIG = os.path.join(HOME, ".fleet-bridge", "config.json")
@@ -93,7 +99,17 @@ def main():
 
     account, env_file = settings()
     env = {k: v for k, v in os.environ.items() if k not in STRIP}
-    env.update(CLAUDE_CODE_OAUTH_TOKEN=token(env_file), FLEET_AGENT="1")
+    cfg = route.load_config()
+    chosen = route.decide("agent", args.model, cfg)["account"] if route.configured(cfg) else None
+    if chosen:
+        try:
+            route.apply(env, chosen, cfg)
+        except route.RouteError as exc:
+            sys.exit("fleet-agent: %s" % exc)
+        account = chosen["label"]
+    else:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token(env_file)
+    env["FLEET_AGENT"] = "1"
     cmd = ["claude", "-p", "--output-format", "json", "--no-session-persistence",
            "--append-system-prompt", FRAME + ("" if args.write else
                                               " You are read-only: do not try to edit files.")]

@@ -1,0 +1,13 @@
+[Unit]
+Description=fleet-bridge quota proxy (loopback; moves a running session between your accounts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.fleet-bridge/bin/quota-proxy.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

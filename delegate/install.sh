@@ -36,6 +36,7 @@ chmod 700 "$HOME/.fleet-bridge"
 install -m 755 "$here/fleet-agent.py" "$bin/fleet-agent"
 install -m 755 "$here/agent-guard.sh" "$bin/agent-guard.sh"
 install -m 755 "$here/delegate-session.py" "$bin/delegate-session"
+install -m 644 "$here/route.py" "$bin/route.py"     # imported by both; see docs/delegate.md
 
 if [ ! -s "$ENV_FILE" ]; then
   echo "warning: $ENV_FILE is missing or empty; fleet-agent refuses to run until it holds the token" >&2
@@ -47,7 +48,9 @@ python3 - "$HOME/.fleet-bridge/config.json" "$ACCOUNT" "$ENV_FILE" "$SESSIONS" "
 import json, os, sys
 path, account, env_file, sessions, repos = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1", sys.argv[5:]
 d = json.load(open(path)) if os.path.exists(path) else {}
-d["delegate"] = {"account": account, "env_file": env_file, "repos": repos}
+# Keep what else the block holds (accounts, failover, session_repos): a re-install updates
+# the account, its token file and the repos, and never drops the routing setup.
+d["delegate"] = {**(d.get("delegate") or {}), "account": account, "env_file": env_file, "repos": repos}
 if sessions:
     d["delegate"]["session_repos"] = repos
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

@@ -106,7 +106,10 @@ The tests need no Claude account, no internet access and no systemd.
 
 `fleet-agent` runs Claude Code under a second account that you hold. Use each account within the
 terms of its own plan. This project is about coordinating your own machines and accounts, not
-sharing one account between people.
+sharing one account between people. With a Caravan hub on the fleet, new sessions and agent runs
+can start on whichever of your accounts has the most headroom for their model
+([docs/delegate.md](docs/delegate.md), "Routing by headroom"), and the optional quota proxy
+moves a running session's requests between them ([docs/proxy.md](docs/proxy.md)).
 
 ## Roadmap
 

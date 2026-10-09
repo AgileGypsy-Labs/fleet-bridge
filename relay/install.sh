@@ -10,16 +10,20 @@
 #   --peer      NAME=PORT for each other node (repeatable).
 #   --hub       hub ssh endpoints, preferred first (see hub-ssh.sh).
 #   --hub-user  the account on the hub.
-#   --usage     LABEL=claude-login  or  LABEL=token-headers:ENV_FILE  (repeatable, optional)
-#               Claude accounts whose usage this node reports in GET /v1/status. Replaces
-#               the node's list when given. See relay/nodestatus.py for the two sources.
+#   --usage     LABEL=claude-login[:CREDENTIALS]  or  LABEL=token-headers:ENV_FILE
+#               (repeatable, optional). Claude accounts whose usage this node reports in
+#               GET /v1/status. Replaces the node's list when given. See relay/nodestatus.py
+#               for the two sources. CREDENTIALS is that login's .credentials.json when it is
+#               not ~/.claude's (a second account kept in its own CLAUDE_CONFIG_DIR).
+#   --settings  a settings.json to register the SessionStart hook in (repeatable; default
+#               ~/.claude/settings.json). One per CLAUDE_CONFIG_DIR sessions start from here.
 #
 # The first node to run this generates the shared secret. Copy it to every other node
 # BEFORE running install there, or that node generates its own and every message 401s:
 #   ssh <node> 'umask 077; mkdir -p ~/.fleet-bridge; cat > ~/.fleet-bridge/secret' < ~/.fleet-bridge/secret
 # The secret is never printed; compare the fingerprint this script prints on each node.
 set -euo pipefail
-NODE="" PORT="" HUB="" HUB_USER_ARG="" PEERS=() USAGE=()
+NODE="" PORT="" HUB="" HUB_USER_ARG="" PEERS=() USAGE=() SETTINGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --node) NODE="$2"; shift 2 ;;
@@ -28,13 +32,15 @@ while [ $# -gt 0 ]; do
     --hub) HUB="$2"; shift 2 ;;
     --hub-user) HUB_USER_ARG="$2"; shift 2 ;;
     --usage) USAGE+=("$2"); shift 2 ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    --settings) SETTINGS+=("$2"); shift 2 ;;
+    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
 [ -n "$NODE" ] && [ -n "$PORT" ] && [ -n "$HUB" ] && [ -n "$HUB_USER_ARG" ] && [ "${#PEERS[@]}" -gt 0 ] \
   || { echo "need --node, --port, --hub, --hub-user and at least one --peer (see --help)" >&2; exit 2; }
 case "$PORT" in *[!0-9]*) echo "--port must be a number" >&2; exit 2 ;; esac
+[ "${#SETTINGS[@]}" -gt 0 ] || SETTINGS=("$HOME/.claude/settings.json")
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOME_DIR="$HOME/.fleet-bridge"
@@ -81,18 +87,25 @@ if usage:
     accounts = []
     for spec in usage:
         label, _, src = spec.partition("=")
-        source, _, env_file = src.partition(":")
-        if not label or source not in ("claude-login", "token-headers") or (source == "token-headers") != bool(env_file):
-            sys.exit("bad --usage %r: want LABEL=claude-login or LABEL=token-headers:ENV_FILE" % spec)
-        accounts.append({"label": label, "source": source, **({"env_file": env_file} if env_file else {})})
+        source, _, arg = src.partition(":")
+        if not label or source not in ("claude-login", "token-headers") or (source == "token-headers" and not arg):
+            sys.exit("bad --usage %r: want LABEL=claude-login[:CREDENTIALS] or LABEL=token-headers:ENV_FILE" % spec)
+        acct = {"label": label, "source": source}
+        if source == "token-headers":
+            acct["env_file"] = arg
+        elif arg:
+            acct["credentials"] = arg     # that login's .credentials.json (nodestatus.sample_login)
+        accounts.append(acct)
     cfg["accounts"] = accounts
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as fh:
     json.dump(cfg, fh, indent=2)
 PY
 
-# Register the SessionStart hook without disturbing any other hook. Backs up once.
-python3 - "$HOME/.claude/settings.json" "$BIN/session-start.sh" <<'PY'
+# Register the SessionStart hook without disturbing any other hook. Backs up once. One
+# settings.json per CLAUDE_CONFIG_DIR this node starts sessions from (--settings).
+for settings in "${SETTINGS[@]}"; do
+python3 - "$settings" "$BIN/session-start.sh" <<'PY'
 import json, os, shutil, sys
 path, command = sys.argv[1], sys.argv[2]
 try:
@@ -114,6 +127,7 @@ else:
     os.replace(tmp, path)
     print("registered SessionStart hook in", path)
 PY
+done
 
 install -m 0644 "$SRC/fleet-relay.service" "$SRC/fleet-relay-tunnel.service" "$UNITS/"
 systemctl --user daemon-reload

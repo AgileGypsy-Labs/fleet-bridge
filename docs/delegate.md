@@ -85,6 +85,63 @@ unchanged.
 - The guard lets these sessions use the Agent tool, since their subagents already run on the
   delegate account.
 
+### Failover
+
+When the machine's own login can't be used, say its plan is suspended or used up, move every
+session to the delegate account in one step:
+
+```bash
+~/.fleet-bridge/bin/delegate-session --failover on       # every new session, in any folder
+~/.fleet-bridge/bin/delegate-session --failover off      # back to session_repos only
+~/.fleet-bridge/bin/delegate-session --failover status
+```
+
+It covers every folder, including ones created after it was switched on. It still fails closed:
+a bad token file stops the session rather than falling back to the machine's login. Sessions
+already running keep their account until you close and resume them.
+
+## Routing by headroom
+
+With a [Caravan](https://github.com/AgileGypsy-Labs/caravan) hub on the fleet, the folder rules
+above give way to a balance: every new session (through `delegate-session`) and every
+`fleet-agent` run starts on whichever account has the most headroom for its model, as the hub
+sees it from the relays' usage samples. The hub makes the same choice for its jobs, and all three
+share one round-robin, so two accounts with equal headroom alternate. Add to
+`~/.fleet-bridge/config.json`:
+
+```json
+"route": {"hub": "http://127.0.0.1:7450", "secret_file": "~/.config/caravan/secret",
+          "timeout": 2.0},
+"delegate": {
+  "accounts": [
+    {"label": "you@example.com", "config_dir": "~/.claude", "own": true},
+    {"label": "second@example.com", "config_dir": "~/.claude-second"},
+    {"label": "ops@example.com", "env_file": "~/.fleet-bridge/delegate.env"}
+  ],
+  ...
+}
+```
+
+- An account with `config_dir` is a Claude Code login kept in its own directory: log in once with
+  `CLAUDE_CONFIG_DIR=~/.claude-second claude auth login`. The session runs with that variable set,
+  so it has that login's settings, connectors, usage view and Remote Control. One with `env_file`
+  is a setup-token, as above: it can only make model requests.
+- `"own": true` marks the machine's default login. A session routed anywhere else is marked
+  `FLEET_DELEGATE_SESSION=1`, so the guard treats it as already on a second account.
+- The session's model is its `--model`, else the `model` in `~/.claude/settings.json`. Keep that
+  setting the same in every `config_dir`, or the choice is made for one model and the session
+  runs another.
+- The hub is asked with a 2-second timeout (`route.timeout`), signed with the Caravan secret the
+  node already holds as a worker. When it cannot answer, the last answer for the same kind and
+  model stands in for 15 minutes; after that the folder and failover rules above apply, and
+  `fleet-agent` uses the delegate account. Nothing waits on the balancer.
+- Every decision is logged to `~/.fleet-bridge/route.log` (kind, model, account, source, the
+  hub's reason). `~/.fleet-bridge/bin/route.py --kind session --model fable` shows what the next
+  session would get.
+- The SessionStart hook records the account (`FLEET_ACCOUNT`, else the login directory's name)
+  and model in the registry, so `send.py <peer> --account second@example.com "..."` reaches the
+  newest session on that account, and `/v1/health` and `/v1/status` count sessions by account.
+
 ## Permission modes
 
 | | Tools | Enforced by |

@@ -27,11 +27,18 @@ sid=$(printf '%s' "$payload" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("session_id",""))
 except Exception: print("")' 2>/dev/null || true)
 [ -n "$sid" ] || sid="pid-$PPID"
+model=$(printf '%s' "$payload" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("model") or "")
+except Exception: print("")' 2>/dev/null || true)
 
 mkdir -p "$REG"
-python3 - "$REG" "$sid" "$NODE" <<'PY'
+python3 - "$REG" "$sid" "$NODE" "$model" <<'PY'
 import json, os, sys, time
-reg, sid, node = sys.argv[1], sys.argv[2], sys.argv[3]
+reg, sid, node, model = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# The account: what delegate-session / fleet-agent routed this session to (FLEET_ACCOUNT), else
+# the login directory it runs from. Lets a peer address "the ai@ session on this node".
+account = os.environ.get("FLEET_ACCOUNT") or ""
+config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or ""
 entry = {
     "session_id": sid,
     "node": node,
@@ -40,6 +47,8 @@ entry = {
     "cwd": os.getcwd(),
     "pid": os.getppid(),
     "registered_at": time.time(),
+    "account": account or (os.path.basename(config_dir) if config_dir else ""),
+    "model": model,
 }
 path = os.path.join(reg, sid + ".json")
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

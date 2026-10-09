@@ -84,6 +84,7 @@ def main():
     ap.add_argument("peer", nargs="?")
     ap.add_argument("text", nargs="?")
     ap.add_argument("--session", help="target a specific session id prefix")
+    ap.add_argument("--account", help="target the peer's newest session on this account label")
     ap.add_argument("--from", dest="sender", default=node_name())
     ap.add_argument("--peers", action="store_true", help="list configured peers and their health")
     ap.add_argument("--local", action="store_true", help="notify live sessions on this node")
@@ -124,6 +125,8 @@ def main():
     payload = {"text": args.text, "from": args.sender}
     if args.session:
         payload["session"] = args.session
+    if args.account:
+        payload["account"] = args.account
     body = json.dumps(payload).encode()
     ts = str(int(time.time()))
     sig = hmac.new(secret, ts.encode() + b"." + body, hashlib.sha256).hexdigest()

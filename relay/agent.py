@@ -96,10 +96,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/health":
             return self._json(404, {"error": "not found"})
         cfg = load_config()
+        live = live_sessions()
+        accounts = {}
+        for e in live:
+            accounts[e.get("account") or "?"] = accounts.get(e.get("account") or "?", 0) + 1
         self._json(200, {
             "ok": True,
             "envelope": cfg.get("envelope"),
-            "sessions": [e["session_id"] for e in live_sessions()],
+            "sessions": [e["session_id"] for e in live],
+            "accounts": accounts,
         })
 
     def do_POST(self):
@@ -140,8 +145,12 @@ class Handler(BaseHTTPRequestHandler):
         found = live_sessions()
         if msg.get("session"):
             found = [e for e in found if e["session_id"].startswith(msg["session"])]
+        if msg.get("account"):
+            # the newest live session running on that account (the registry's label)
+            found = [e for e in found if e.get("account") == msg["account"]]
         if not found:
-            return self._json(404, {"error": "no live registered session"})
+            return self._json(404, {"error": "no live registered session"
+                                    + (" on %s" % msg["account"] if msg.get("account") else "")})
         target = found[0]
 
         try:
@@ -155,6 +164,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {
             "delivered_to": target["session_id"],
             "node": target.get("node"),
+            "account": target.get("account") or None,
             "socket_reply": reply or None,
         })
 

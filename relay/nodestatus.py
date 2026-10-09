@@ -25,6 +25,7 @@ Account usage comes from a background Sampler, configured in ~/.fleet-bridge/con
 import glob
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -112,6 +113,30 @@ def load():
     return {"load1": round(l1, 2), "cpus": cpus, "per_core": round(l1 / cpus, 2), "mem_used_pct": used}
 
 
+def host(root="/"):
+    """Machine health the hub dashboard shows beside the Claude figures: CPU temperature, root
+    disk, uptime, pending apt updates and whether a reboot is due. Numbers only."""
+    temps = {}
+    for zone in glob.glob("/sys/class/thermal/thermal_zone*"):
+        raw = _read(os.path.join(zone, "temp")).strip()
+        if raw.lstrip("-").isdigit():
+            temps[_read(os.path.join(zone, "type")).strip()] = int(raw) / 1000
+    temp = temps.get("x86_pkg_temp", max(temps.values()) if temps else None)
+    try:
+        vfs = os.statvfs(root)
+        disk = round(100 * (1 - vfs.f_bavail / vfs.f_blocks)) if vfs.f_blocks else None
+    except OSError:
+        disk = None
+    up = _read("/proc/uptime").split()[:1]
+    updates = None
+    m = re.search(r"(\d+) updates? can be applied", _read("/var/lib/update-notifier/updates-available"))
+    if m:
+        updates = int(m.group(1))
+    return {"cpu_temp_c": None if temp is None else round(temp), "disk_used_pct": disk,
+            "uptime_s": int(float(up[0])) if up else None, "updates": updates,
+            "reboot_required": os.path.exists("/var/run/reboot-required")}
+
+
 # ---- Claude sessions and delegated work ----------------------------------------------
 
 def repo_of(cwd):
@@ -142,11 +167,14 @@ def sessions(entries):
         sock = (e.get("socket") or "").removeprefix("uds:")
         if sock and (sock not in newest or e.get("registered_at", 0) > newest[sock].get("registered_at", 0)):
             newest[sock] = e
-    by_repo = {}
+    by_repo, by_account = {}, {}
     for e in newest.values():
         repo = repo_of(e.get("cwd") or "/")
         by_repo[repo] = by_repo.get(repo, 0) + 1
-    return {"total": len(newest), "by_repo": dict(sorted(by_repo.items(), key=lambda kv: -kv[1]))}
+        acct = e.get("account") or "?"
+        by_account[acct] = by_account.get(acct, 0) + 1
+    return {"total": len(newest), "by_repo": dict(sorted(by_repo.items(), key=lambda kv: -kv[1])),
+            "by_account": dict(sorted(by_account.items(), key=lambda kv: -kv[1]))}
 
 
 def delegate(cfg, log=None, now=None):
@@ -176,7 +204,19 @@ def delegate(cfg, log=None, now=None):
     except (OSError, subprocess.SubprocessError, ValueError):
         running = None
     last = runs[-1] if runs else None   # fleet-agent appends as each run finishes
-    return {"account": cfg["delegate"].get("account"),
+    d = cfg["delegate"]
+    return {"account": d.get("account"),
+            # How this node routes work, so the hub can show it: repo names only, never the
+            # token file or its path.
+            "config": {"session_repos": [os.path.basename(os.path.expanduser(p).rstrip("/"))
+                                         for p in d.get("session_repos") or []],
+                       "failover": d.get("failover") is True,
+                       # routing by headroom: a hub to ask and accounts to choose from (labels only)
+                       "routed": bool(cfg.get("route")) and any(
+                           isinstance(a, dict) and a.get("label") and (a.get("config_dir") or a.get("env_file"))
+                           for a in d.get("accounts") or []),
+                       "accounts": [a["label"] for a in d.get("accounts") or []
+                                    if isinstance(a, dict) and a.get("label")]},
             "runs_1h": sum(1 for r in day if r["t"] > now - 3600), "runs_24h": len(day),
             "failed_24h": sum(1 for r in day if not r.get("ok")), "running": running,
             "last": {"t": last["t"], "repo": repo_of(last.get("cwd") or "/"), "secs": last.get("secs"),
@@ -239,9 +279,15 @@ def sample_login(credentials=None):
     limits = []
     for l in d.get("limits") or []:
         model = ((l.get("scope") or {}).get("model") or {}).get("display_name")
+        # `active` means IN FORCE (the window is used up), the same as a rejected header
+        # status below. The API's is_active says only that the window is counting: a 5-hour
+        # window at 13% is "active" the moment a prompt opens it, and reading that as "in
+        # force" refused the account for every job (2026-10-09).
+        pct = l.get("percent")
         limits.append({"name": l.get("kind"), "group": l.get("group"), "model": model,
-                       "percent": l.get("percent"), "severity": l.get("severity"),
-                       "active": bool(l.get("is_active")), "resets_at": l.get("resets_at")})
+                       "percent": pct, "severity": l.get("severity"),
+                       "active": pct is not None and pct >= 100, "counting": bool(l.get("is_active")),
+                       "resets_at": l.get("resets_at")})
     if not limits:                       # older response shape: the named windows only
         for key, group in (("five_hour", "session"), ("seven_day", "weekly")):
             w = d.get(key) or {}
@@ -343,6 +389,7 @@ def status(cfg, entries, sampler=None):
         "units": units(st.get("units", DEFAULT_UNITS)),
         "power": power(),
         "load": load(),
+        "host": host(),
         "delegate": delegate(cfg),
         "accounts": sampler.snapshot() if sampler else [],
     }
