@@ -59,7 +59,9 @@ LOG = os.path.join(FB, "proxy.log")
 HUB_EVERY = 10            # seconds between ledger refreshes and telemetry posts
 STALE = 900               # a reading older than this says nothing
 RESET_SOON = 900          # a window resetting this soon counts as empty (as in Caravan's policy)
-UPSTREAM_TIMEOUT = 600    # a long generation
+UPSTREAM_TIMEOUT = 600            # a long generation
+MAX_BODY = 32 * 1024 * 1024   # larger requests are refused with 413, never buffered or forwarded
+MAX_HEADERS = 64              # stdlib caps at 100/65536-per-line; this tightens the count
 INFERENCE = re.compile(r"^/v1/messages(?:/|\?|$)")
 MODEL_RE = re.compile(rb'"model"\s*:\s*"([^"]{1,120})"')
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
@@ -398,18 +400,25 @@ class Handler(BaseHTTPRequestHandler):
         self.relay("DELETE")
 
     def _body(self):
+        """The request body, or None when it exceeds MAX_BODY (the caller answers 413 and
+        closes: an oversized request is never buffered, swapped or sent upstream)."""
         if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
-            out = []
+            out, total = [], 0
             while True:
                 size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
                 if size == 0:
                     while self.rfile.readline() not in (b"\r\n", b"\n", b""):
                         pass
                     break
+                total += size
+                if total > MAX_BODY:
+                    return None
                 out.append(self.rfile.read(size))
                 self.rfile.readline()
             return b"".join(out)
         n = int(self.headers.get("Content-Length") or 0)
+        if n > MAX_BODY:
+            return None
         return self.rfile.read(n) if n else b""
 
     def _reply(self, status, obj):
@@ -423,10 +432,16 @@ class Handler(BaseHTTPRequestHandler):
     def relay(self, method):
         st = self.server.state
         t0 = time.time()
+        if len(self.headers) > MAX_HEADERS:
+            self.close_connection = True          # the body is unread; this connection is out of sync
+            return self._reply(431, {"error": "too many headers"})
         try:
             body = self._body()
         except (ValueError, OSError):
             return self._reply(400, {"error": "bad request body"})
+        if body is None:
+            self.close_connection = True          # oversize: refused before buffering or forwarding
+            return self._reply(413, {"error": "body exceeds %d bytes" % MAX_BODY})
         own = self.headers.get("X-Fleet-Account") or ""
         device_ok = bool(st.device_key) and hmac.compare_digest(self.headers.get("X-Fleet-Device", ""), st.device_key)
         usable = [l for l in st.accounts.labels if st.accounts.token(l)]

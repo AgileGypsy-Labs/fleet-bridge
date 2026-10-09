@@ -253,6 +253,79 @@ class QuotaProxyTest(unittest.TestCase):
             self.assertNotIn(secret, text)
         self.assertIn('"account": "john@"', text)
 
+    def _raw(self, send, read_after=True):
+        """Open a raw socket to the proxy, run send(sock), return the status line + headers text."""
+        import socket
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        self.addCleanup(s.close)
+        try:
+            send(s)
+        except (BrokenPipeError, ConnectionResetError):
+            pass                                          # the proxy may refuse mid-send; the reply still stands
+        out = b""
+        try:
+            while b"\r\n\r\n" not in out:
+                data = s.recv(65536)
+                if not data:
+                    break
+                out += data
+        except (ConnectionResetError, TimeoutError):
+            pass
+        return out.decode("latin-1", "replace")
+
+    def test_oversize_content_length_is_refused_with_413_unread(self):
+        huge = self.qp.MAX_BODY + 1
+        def send(s):
+            s.sendall(("POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n"
+                       "Authorization: Bearer login-token\r\nX-Fleet-Device: device-key-123\r\n"
+                       "Content-Type: application/json\r\nContent-Length: %d\r\n\r\n" % huge).encode())
+            s.sendall(b"x" * 1024)                        # only a sliver: the 413 must not wait for the body
+        t0 = time.time()
+        reply = self._raw(send)
+        self.assertIn(" 413 ", reply.splitlines()[0])
+        self.assertLess(time.time() - t0, 5)              # refused up front, not after a 32MB read
+        self.assertEqual(self.upstream.requests, [])      # nothing went upstream
+
+    def test_oversize_chunked_body_is_refused_with_413(self):
+        def send(s):
+            s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n"
+                      b"Authorization: Bearer login-token\r\nX-Fleet-Device: device-key-123\r\n"
+                      b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
+            chunk = b"y" * 65536
+            frame = b"%x\r\n%s\r\n" % (len(chunk), chunk)
+            for _ in range(self.qp.MAX_BODY // len(chunk) + 2):
+                s.sendall(frame)                          # never sends the final 0 chunk: the cap must fire first
+        reply = self._raw(send)
+        self.assertIn(" 413 ", reply.splitlines()[0])
+        self.assertEqual(self.upstream.requests, [])
+
+    def test_header_flood_is_refused_with_431(self):
+        def send(s):
+            lines = ["POST /v1/messages HTTP/1.1", "Host: api.anthropic.com",
+                     "Authorization: Bearer login-token", "X-Fleet-Device: device-key-123",
+                     "Content-Length: 2"]
+            lines += ["X-Pad-%d: a" % i for i in range(self.qp.MAX_HEADERS + 1)]
+            s.sendall(("\r\n".join(lines) + "\r\n\r\nhi").encode())
+        reply = self._raw(send)
+        self.assertIn(" 431 ", reply.splitlines()[0])
+        self.assertEqual(self.upstream.requests, [])
+
+    def test_body_at_the_limit_still_relays(self):
+        # a large-but-legal body passes through untouched (regression for the new guard)
+        import socket
+        payload = json.dumps({"model": "claude-fable-5-1", "stream": True,
+                              "messages": [{"role": "user", "content": "z" * 200000}]}).encode()
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        c.request("POST", "/v1/messages", body=payload,
+                  headers={"Authorization": "Bearer login-token", "X-Fleet-Device": "device-key-123",
+                           "Content-Type": "application/json", "Host": "api.anthropic.com",
+                           "anthropic-beta": "oauth-2025-04-20"})
+        r = c.getresponse()
+        r.read()
+        c.close()
+        self.assertEqual(r.status, 200)
+        self.assertEqual(len(self.upstream.requests[-1]["body"]), len(payload))
+
     def test_proxy_env_points_a_child_at_a_live_proxy_only(self):
         import route
         route.CONFIG = os.path.join(self.home, "config.json")

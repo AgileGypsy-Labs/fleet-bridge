@@ -1,0 +1,19 @@
+# Coverage for the suite AND the subprocesses it spawns (fleet-agent, delegate-session,
+# live-session children) via tests/_covshim + COVERAGE_PROCESS_START.
+[run]
+data_file = ${COVERAGE_DATA_DIR-.}/.coverage
+source =
+    relay
+    proxy
+    tools
+    delegate
+parallel = true
+sigterm = true
+omit =
+    */tests/*
+    */__pycache__/*
+
+[report]
+precision = 1
+exclude_also =
+    if __name__ == .__main__.:
