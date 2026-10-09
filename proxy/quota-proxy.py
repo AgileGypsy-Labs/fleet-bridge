@@ -252,13 +252,18 @@ class Ledger:
     def choose(self, key, own, model, now, switch_at, hysteresis, avoid=None, labels=None):
         """(label, why, switched). Sticky per session: the account it is on stays until its worst
         applicable window reaches switch_at; then the best other account under switch_at minus
-        hysteresis. `avoid` forces a move away from an account that just refused; `labels`
-        narrows the choice to the accounts with a usable token right now."""
+        hysteresis. A request that names its own account (X-Fleet-Account, the hub's choice for
+        a Caravan job) starts there every time, whatever the session was on before, and still
+        moves off it when that account is over the line. `avoid` forces a move away from an
+        account that just refused; `labels` narrows the choice to the accounts with a usable
+        token right now."""
         labels = list(labels) if labels else self.labels
         with self.lock:
             cur = self.sticky.get(key)
-        if cur not in labels:
-            cur = own if own in labels else labels[0]
+        if own in labels:
+            cur = own
+        elif cur not in labels:
+            cur = labels[0]
         w = {l: self.worst(l, model, now) for l in labels}
 
         def rank(label):

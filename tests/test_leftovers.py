@@ -470,6 +470,19 @@ class ProxyInternalsTest(Tmp):
         self.assertIn("every account over the line", why)
         self.assertEqual(led.take_events(limit=1)[0]["account"], "john@")
 
+    def test_own_account_outranks_the_sticky_choice(self):
+        led = qp.Ledger(["john@", "ai@"])
+        now = 1_000_000.0
+        led.seen = {"john@": {"5h": {"pct": 10, "reset": None, "status": None, "ts": now}},
+                    "ai@": {"5h": {"pct": 60, "reset": None, "status": None, "ts": now}}}
+        self.assertEqual(led.choose("k", "", None, now, 90, 3)[0], "john@")        # no own: the first label
+        self.assertEqual(led.choose("k", "ai@", None, now, 90, 3)[0], "ai@")       # own wins over the sticky john@
+        self.assertEqual(led.choose("k", "", None, now, 90, 3)[0], "ai@")          # and is what the key sticks to now
+        led.seen["ai@"]["5h"]["pct"] = 95
+        label, why, switched = led.choose("k", "ai@", None, now, 90, 3)            # own over the line: the best other
+        self.assertEqual((label, switched), ("john@", True))
+        self.assertEqual(led.choose("k", "nobody@", None, now, 90, 3)[0], "john@")  # an unknown own: the sticky choice
+
     def test_upstream_reconnect_and_drop(self):
         up = qp.Upstream("http://127.0.0.1:%d" % free_port())
         with self.assertRaises(OSError):
