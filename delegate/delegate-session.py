@@ -96,6 +96,11 @@ def main():
         env_file = None
     else:
         env_file = env_file_for(os.getcwd())
+        if not env_file and route.configured(cfg):
+            # No verdict (the hub and its cache are silent, or every account is over the line):
+            # the session keeps the machine's own login, and the proxy, when it is up, still
+            # balances it request by request.
+            route.proxy_env(os.environ, cfg)
     if env_file:
         token = None
         try:

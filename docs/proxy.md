@@ -64,6 +64,11 @@ Sessions started through `delegate-session` and `fleet-agent` runs get `ANTHROPI
 and the device key (`route.proxy_env`) whenever the proxy is configured, switched on and
 listening; a proxy that is down costs nothing, the session goes direct. Caravan and Factory
 workers get the same two variables from their unit files.
+They also get `ENABLE_TOOL_SEARCH=true` unless it is already set: Claude Code switches tool search
+off behind a base URL that is not Anthropic's and then sends every MCP tool schema with each request;
+the proxy forwards request bodies unchanged, so tool search works through it. A session that gets no
+routing verdict (the hub silent, or every account over the line) keeps the machine's own login and is
+still pointed at the proxy when one is up.
 
 ```bash
 ~/.fleet-bridge/bin/quota-proxy --off      # pass-through, no restart; --on to resume; --status

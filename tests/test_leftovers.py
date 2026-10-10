@@ -154,6 +154,19 @@ class DelegateSessionTest(Tmp):
                 self.run_main(["claude"])
         self.assertIn("bad token file", str(cm.exception.code))
 
+    def test_no_verdict_still_points_at_the_proxy(self):
+        self.cfg()
+        with mock.patch.object(rt, "proxy_env") as proxied:
+            self.run_main(["claude"])                                  # routing not configured
+        proxied.assert_not_called()
+        with mock.patch.object(rt, "configured", return_value=True), \
+             mock.patch.object(rt, "decide", return_value={"account": None}), \
+             mock.patch.object(rt, "proxy_env") as proxied:
+            self.run_main(["claude"])
+        proxied.assert_called_once()
+        self.assertIs(proxied.call_args[0][0], os.environ)
+        self.assertEqual(self.exec_calls[-1], ("claude", ["claude"]))
+
     def test_exec_failure_is_reported(self):
         self.cfg()
         with mock.patch.object(ds.os, "execvp", side_effect=OSError("nope")):
@@ -233,6 +246,25 @@ class RouteEdgesTest(Tmp):
         self.assertIn("X-Fleet-Account: ai@", env["ANTHROPIC_CUSTOM_HEADERS"])
         self.path("proxy.off", "")
         self.assertEqual(rt.proxy_env({}, cfg), {})                       # switched off
+
+    def test_apply_leaves_the_default_config_dir_implicit(self):
+        own = {"label": "john@", "config_dir": "~/.claude", "own": True}
+        env = rt.apply({"CLAUDE_CONFIG_DIR": "/elsewhere"}, own)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", env)                      # the default folder stays implicit
+        self.assertEqual(env["FLEET_ACCOUNT"], "john@")
+        env = rt.apply({}, {"label": "second@", "config_dir": self.tmp})
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], self.tmp)
+
+    def test_proxy_env_keeps_tool_search_on(self):
+        key = self.path("proxy.key", "device-key\n")
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        cfg = {"proxy": {"device_key": key, "listen": "127.0.0.1:%d" % srv.getsockname()[1]}}
+        self.assertEqual(rt.proxy_env({}, cfg)["ENABLE_TOOL_SEARCH"], "true")
+        self.assertEqual(rt.proxy_env({"ENABLE_TOOL_SEARCH": "false"}, cfg)["ENABLE_TOOL_SEARCH"], "false")
+        self.assertNotIn("ENABLE_TOOL_SEARCH", rt.proxy_env({}, {}))      # no proxy, nothing added
 
     def test_settings_model_and_main(self):
         d = os.path.join(self.tmp, "cfgdir")

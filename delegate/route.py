@@ -189,7 +189,12 @@ def apply(env, account, cfg=None):
     for key in CREDENTIALS:
         env.pop(key, None)
     if account.get("config_dir"):
-        env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(account["config_dir"])
+        d = os.path.expanduser(account["config_dir"])
+        # The default folder stays implicit. CLAUDE_CONFIG_DIR, even when it names ~/.claude, moves
+        # the global config from ~/.claude.json to <dir>/.claude.json, and the session would start
+        # without its user MCP servers, project trust and onboarding state.
+        if os.path.realpath(d) != os.path.realpath(os.path.expanduser("~/.claude")):
+            env["CLAUDE_CONFIG_DIR"] = d
     else:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token(account["env_file"])
     env["FLEET_ACCOUNT"] = account["label"]
@@ -229,6 +234,11 @@ def proxy_env(env, cfg, label=None):
     env["ANTHROPIC_BASE_URL"] = "http://" + listen
     headers = ["X-Fleet-Device: " + key] + (["X-Fleet-Account: " + label] if label else [])
     env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(headers)
+    # Claude Code switches tool search off behind any base URL that is not Anthropic's own, and
+    # then sends every MCP tool schema with each request (134k prompt tokens against 47k on a
+    # node with many servers). The proxy forwards bodies unchanged, so it stays on unless the
+    # caller has set it.
+    env.setdefault("ENABLE_TOOL_SEARCH", "true")
     return env
 
 

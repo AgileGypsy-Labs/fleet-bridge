@@ -128,6 +128,9 @@ share one round-robin, so two accounts with equal headroom alternate. Add to
   is a setup-token, as above: it can only make model requests.
 - `"own": true` marks the machine's default login. A session routed anywhere else is marked
   `FLEET_DELEGATE_SESSION=1`, so the guard treats it as already on a second account.
+- The machine's default folder (`~/.claude`) is left implicit: `CLAUDE_CONFIG_DIR` set to it would move
+  the global config out of `~/.claude.json`, and the session would start without its user MCP
+  servers, project trust and onboarding state.
 - The session's model is its `--model`, else the `model` in `~/.claude/settings.json`. Keep that
   setting the same in every `config_dir`, or the choice is made for one model and the session
   runs another.
